@@ -213,10 +213,21 @@ BuildDocker() {
   go build -o ./bin/"$appName" -ldflags="$ldflags" -tags=jsoniter .
 }
 
+BuildDockerAmd64() {
+  export PATH="$PATH:$PWD/build/musl-libs/bin"
+  export GOOS=linux GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-linux-musl-gcc
+  mkdir -p build/linux/amd64
+  CGO_LDFLAGS="-static" go build -o "build/linux/amd64/$appName" -ldflags="$(GetMuslStaticLdflags)" -tags=jsoniter .
+  AssertStaticBinary "build/linux/amd64/$appName"
+}
+
 PrepareBuildDockerMusl() {
   mkdir -p build/musl-libs
   BASE="https://github.com/OpenListTeam/musl-compilers/releases/latest/download/"
   FILES=(x86_64-linux-musl-cross aarch64-linux-musl-cross i486-linux-musl-cross armv6-linux-musleabihf-cross armv7l-linux-musleabihf-cross riscv64-linux-musl-cross powerpc64le-linux-musl-cross loongarch64-linux-musl-cross) ## Disable s390x-linux-musl-cross builds
+  if [ "$1" = "amd64" ]; then
+    FILES=(x86_64-linux-musl-cross)
+  fi
   for i in "${FILES[@]}"; do
     url="${BASE}${i}.tgz"
     lib_tgz="build/${i}.tgz"
@@ -620,7 +631,7 @@ for arg in "$@"; do
         buildType="$arg"
       fi
       ;;
-    docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web)
+    docker|docker-amd64|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web)
       if [ -z "$dockerType" ]; then
         dockerType="$arg"
       fi
@@ -640,6 +651,8 @@ if [ "$buildType" = "dev" ]; then
   FetchWebRolling
   if [ "$dockerType" = "docker" ]; then
     BuildDocker
+  elif [ "$dockerType" = "docker-amd64" ]; then
+    BuildDockerAmd64
   elif [ "$dockerType" = "docker-multiplatform" ]; then
       BuildDockerMultiplatform
   elif [ "$dockerType" = "web" ]; then
@@ -655,6 +668,8 @@ elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
   fi
   if [ "$dockerType" = "docker" ]; then
     BuildDocker
+  elif [ "$dockerType" = "docker-amd64" ]; then
+    BuildDockerAmd64
   elif [ "$dockerType" = "docker-multiplatform" ]; then
     BuildDockerMultiplatform
   elif [ "$dockerType" = "linux_musl_arm" ]; then
@@ -698,6 +713,8 @@ elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
 elif [ "$buildType" = "prepare" ]; then
   if [ "$dockerType" = "docker-multiplatform" ]; then
     PrepareBuildDockerMusl
+  elif [ "$dockerType" = "docker-amd64" ]; then
+    PrepareBuildDockerMusl amd64
   fi
 elif [ "$buildType" = "zip" ]; then
   if [ -n "$otherParam" ]; then
@@ -721,7 +738,7 @@ elif [ "$buildType" = "zip" ]; then
   fi
 else
   echo -e "Parameter error"
-  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web] [lite] [other_params]"
+  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-amd64|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web] [lite] [other_params]"
   echo -e "Examples:"
   echo -e "  $0 dev"
   echo -e "  $0 dev lite"
