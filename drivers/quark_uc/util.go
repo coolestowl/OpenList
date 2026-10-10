@@ -25,15 +25,20 @@ import (
 // do others that not defined in Driver interface
 
 func (d *QuarkOrUC) request(pathname string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
-	u := d.conf.api + pathname
+	return d.requestAt(d.conf.api+pathname, true, method, callback, resp)
+}
+
+func (d *QuarkOrUC) requestAt(u string, pc bool, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
 	req := base.RestyClient.R()
 	req.SetHeaders(map[string]string{
 		"Cookie":  d.Cookie,
 		"Accept":  "application/json, text/plain, */*",
 		"Referer": d.conf.referer,
 	})
-	req.SetQueryParam("pr", d.conf.pr)
-	req.SetQueryParam("fr", "pc")
+	if pc {
+		req.SetQueryParam("pr", d.conf.pr)
+		req.SetQueryParam("fr", "pc")
+	}
 	if callback != nil {
 		callback(req)
 	}
@@ -44,6 +49,10 @@ func (d *QuarkOrUC) request(pathname string, method string, callback base.ReqCal
 	req.SetError(&e)
 	res, err := req.Execute(method, u)
 	if err != nil {
+		if !pc {
+			// Resty errors can contain the request URL and its mobile credentials.
+			return nil, errors.New("failed mobile playback request")
+		}
 		return nil, err
 	}
 	__puus := cookie.GetCookie(res.Cookies(), "__puus")
@@ -60,7 +69,16 @@ func (d *QuarkOrUC) request(pathname string, method string, callback base.ReqCal
 		}
 	}
 
-	if e.Status >= 400 || e.Code != 0 {
+	if res.StatusCode() >= 400 || e.Status >= 400 || e.Code != 0 {
+		if !pc {
+			if strings.Contains(strings.ToLower(e.Message), "plf_invalid") {
+				return nil, errors.New("Quark rejected mobile playback credentials (plf_invalid); refresh the mobile request URL")
+			}
+			return nil, errors.New("Quark mobile playback request failed; check the cookie and mobile request URL")
+		}
+		if e.Message == "" {
+			return nil, fmt.Errorf("Quark request failed with HTTP %d", res.StatusCode())
+		}
 		return nil, errors.New(e.Message)
 	}
 	return res.Body(), nil
@@ -145,26 +163,58 @@ func (d *QuarkOrUC) getTranscodingLink(file model.Obj) (*model.Link, error) {
 	var resp TranscodingResp
 	ua := d.conf.ua
 
-	_, err := d.request("/file/v2/play/project", http.MethodPost, func(req *resty.Request) {
+	request := d.request
+	path := "/file/v2/play/project"
+	if d.MobileRequestURL != "" {
+		mobileURL, err := mobilePlayURL(d.MobileRequestURL)
+		if err != nil {
+			return nil, err
+		}
+		path = mobileURL
+		request = func(pathname string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
+			return d.requestAt(pathname, false, method, callback, resp)
+		}
+	}
+
+	_, err := request(path, http.MethodPost, func(req *resty.Request) {
 		req.SetHeader("User-Agent", ua).
 			SetBody(data)
 	}, &resp)
 	if err != nil {
 		return nil, err
 	}
+	if resp.Status >= 400 || resp.Code != 0 {
+		if d.MobileRequestURL != "" {
+			if strings.Contains(strings.ToLower(resp.Message), "plf_invalid") {
+				return nil, errors.New("Quark rejected mobile playback credentials (plf_invalid); refresh the mobile request URL")
+			}
+			return nil, errors.New("Quark mobile playback request failed; check the cookie and mobile request URL")
+		}
+		return nil, errors.New(resp.Message)
+	}
 
+	quality := map[string]int{"low": 0, "normal": 1, "high": 2, "super": 3, "2k": 4, "4k": 5}
+	var best *model.Link
+	bestQuality := -1
 	for _, info := range resp.Data.VideoList {
-		if info.VideoInfo.URL != "" {
-			return &model.Link{
+		if info.VideoInfo.URL == "" {
+			continue
+		}
+		rank := quality[info.Resolution]
+		if best == nil || rank > bestQuality {
+			bestQuality = rank
+			best = &model.Link{
 				URL:           info.VideoInfo.URL,
 				ContentLength: info.VideoInfo.Size,
 				Concurrency:   3,
 				PartSize:      10 * utils.MB,
-			}, nil
+			}
 		}
 	}
-
-	return nil, errors.New("no link found")
+	if best == nil {
+		return nil, errors.New("no link found")
+	}
+	return best, nil
 }
 
 func (d *QuarkOrUC) upPre(file model.FileStreamer, parentId string) (UpPreResp, error) {
